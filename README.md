@@ -3,17 +3,17 @@ llm theoretical performance analysis tools and support params, flops, memory and
 
 ## 主要功能
 
-- 支持张量并行、`pipeline` 并行推理模式
-- 支持 A100、V100、T4 等硬件以及主流 decoder-only 的自回归模型，可自行在配置文件中增加。
-- 支持分析性能瓶颈，不同 layer 是 memory bound 还是 compute bound
-- 支持输出每层和整个模型的参数量、计算量，内存和 latency
-- 推理时支持预填充和解码阶段分别计算内存和 latency、以及理论支持的最大 batch_size 等等。
-- 支持设置计算效率、内存读取效率（不同推理框架可能不一样，这个设置好后，可推测输出实际值）
-- 推理性能理论分析结果的格式化输出
+- 支持张量并行、`pipeline` 并行推理模式。
+- 支持 `A100`、`V100`、`T4` 等硬件以及主流 decoder-only 的自回归模型，可自行在配置文件中增加。
+- 支持分析性能瓶颈，不同 `layer` 是 `memory bound` 还是 `compute bound`，以及 `kv_cache` 的性能瓶颈。
+- 支持输出每层和整个模型的参数量、计算量，内存和 `latency`。
+- 推理时支持预填充和解码阶段分别计算内存和 latency、以及理论支持的最大 `batch_size` 等等。
+- 支持设置计算效率、内存读取效率（不同推理框架可能不一样，这个设置好后，可推测输出实际值）。
+- 推理性能理论分析结果的格式化输出。
 
 ## 如何使用
 
-使用方法，直接调用 `llm_profiler/llm_profiler.py`` 文件中函数 `llm_profile()` 函数并输入相关参数即可。
+使用方法，直接调用 `llm_profiler/llm_profiler.py` 文件中函数 `llm_profile()` 函数并输入相关参数即可。
 
 ```python
 def llm_profile(model_name="llama-13b",
