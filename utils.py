@@ -1,5 +1,14 @@
 from constants import *
 
+def print_list(list):
+    """print one-dimensional list
+
+    :param list: List[int]
+    :return: None
+    """
+    for i, x in enumerate(list):
+        print(x, end='\n')
+        
 def get_dict_depth(d, depth=0):
     if not isinstance(d, dict):
         return depth

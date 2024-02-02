@@ -156,5 +156,38 @@
         "ffn_embed_dim": 32768,
         "model_type": "llama",
         "model_name": "llama-65b"
+    },
+    "llama2-13b":{
+        "num_layers": 40,
+        "n_head": 40,
+        "num_key_value_heads": 40,
+        "hidden_dim": 5120,
+        "ffn_embed_dim": 20480,
+        "vocab_size": 32000,
+        "max_seq_len": 4096,
+        "model_type": "llama",
+        "model_name": "llama2-13b"
+    },
+    "llama2-70b":{
+        "num_layers": 80,
+        "n_head": 64,
+        "num_key_value_heads": 8,
+        "hidden_dim": 8192,
+        "ffn_embed_dim": 32768,
+        "vocab_size": 49960,
+        "max_seq_len": 4096,
+        "model_type": "llama2",
+        "model_name": "llama2-70b"
+    },
+    "internlm-20b": {
+        "num_layers": 60,
+        "n_head": 40,
+        "num_key_value_heads": 40,
+        "hidden_dim": 5120,
+        "ffn_embed_dim": 20480,
+        "vocab_size": 103168,
+        "max_seq_len": 16384,
+        "model_type": "llama",
+        "model_name": "internlm-20b"
     }
 }

@@ -11,6 +11,7 @@ import pprint
 
 from config import *
 from utils import *
+from math import floor
 
 logger = logging.getLogger()
     
@@ -396,8 +397,13 @@ class CountCausalLMMemory(object):
             
             decode_max_batch_size_per_gpu = int(
                 memory_left / (decode_activation_memory_batch_size_1 + kv_cache_memory_batch_size_1) 
-            )
+            )    
+            max_batch_total_tokens = decode_max_batch_size_per_gpu * (seq_len + generate_len)
             
+            # llama2-70b 模型使用了 GQA  技术，kv cache  对应的 head  数目为 8，所以 max_batch_total_tokens  参数可取值为 16384*8。
+            if self.model_config.model_name == "llama2-70b":
+                max_batch_total_tokens *= 8
+                
             assert batch_size <= decode_max_batch_size_per_gpu, (
                 f"batch_size_per_gpu {batch_size} is too large to fit"
                 " in GPU memory, decode_max_batch_size_per_gpu:"
@@ -450,6 +456,7 @@ class CountCausalLMMemory(object):
             "kv_cache_memory_per_gpu": kv_cache_memory_per_gpu,
             "decode_memory_total": decode_memory_total,
             "decode_max_batch_size_per_gpu": decode_max_batch_size_per_gpu,
+            "max_batch_total_tokens": max_batch_total_tokens * 0.97,
         }
         
         return memory_prefill_summary_dict, memory_decode_summary_dict
@@ -492,7 +499,8 @@ class CountCausalLMLatency(object):
         seq_len: int, 
         is_inference=True,
         activation_recomputation: ActivationRecomputation = ActivationRecomputation.FULL,
-        ops_type: str="attn"
+        ops_type: str="attn",
+        stage="decode_"
     ) -> float:
         """Count the latency for the forward layer or model, assuming the compute and memory operations are perfectly overlapped.
 
@@ -534,9 +542,9 @@ class CountCausalLMLatency(object):
         memory_latency = memory / (self.tp_size * self.gpu_hbm_bandwidth)
         
         if memory_latency > compute_latency:
-            print(f"memory_latency {latency_to_string(memory_latency)} > compute_latency {latency_to_string(compute_latency)}, this {ops_type} layer is memory bound!")
+            print(f"{stage} stage: memory_latency {latency_to_string(memory_latency)} > compute_latency {latency_to_string(compute_latency)}, this {ops_type} layer is memory bound!")
         else:
-            print(f"memory_latency {latency_to_string(memory_latency)} <= compute_latency {latency_to_string(compute_latency)}, this {ops_type} layer is compute bound!")
+            print(f"{stage} stage: memory_latency {latency_to_string(memory_latency)} <= compute_latency {latency_to_string(compute_latency)}, this {ops_type} layer is compute bound!")
             
         return max(compute_latency, memory_latency)
     
@@ -573,11 +581,12 @@ class CountCausalLMLatency(object):
         seq_len: int, 
         is_inference: bool=True,
         activation_recomputation: ActivationRecomputation = ActivationRecomputation.FULL,
-        layernorm_dtype_bytes: int = BYTES_FP16
+        layernorm_dtype_bytes: int = BYTES_FP16,
+        stage="decode_"
     ) -> tuple:
-        latency_fwd_per_layer_attn = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, ops_type="attn")
-        latency_fwd_per_layer_mlp = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, ops_type="mlp")
-        latency_fwd_per_layer_layernorm = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, "layernorm")
+        latency_fwd_per_layer_attn = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, ops_type="attn", stage=stage)
+        latency_fwd_per_layer_mlp = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, ops_type="mlp", stage=stage)
+        latency_fwd_per_layer_layernorm = self.common_count_latency_for_ops(batch_size, seq_len, is_inference, activation_recomputation, "layernorm", stage=stage)
         
         latency_fwd_per_layer_tp_comm = self.count_latency_fwd_per_layer_tp_comm(batch_size, seq_len)
     
@@ -704,6 +713,7 @@ class CountCausalLMLatency(object):
             is_inference,
             activation_recomputation,
             layernorm_dtype_bytes,
+            stage=breakdown_prefix
         )
         num_layers_per_gpu = self.num_layers_per_gpu
         
@@ -833,7 +843,8 @@ class LLMProfiler(object):
         flops_efficiency: float = None,
         hbm_memory_efficiency: float = HBM_MEMORY_EFFICIENCY,
         intra_node_memory_efficiency=INTRA_NODE_MEMORY_EFFICIENCY,
-        inter_node_memory_efficiency=INTER_NODE_MEMORY_EFFICIENCY
+        inter_node_memory_efficiency=INTER_NODE_MEMORY_EFFICIENCY,
+        print_flag=True
     ) -> dict:
         """LLM inference analysis given the llm configs and inputs.
 
@@ -856,7 +867,6 @@ class LLMProfiler(object):
                 "Warning: the number of layers is not divisible by pp_size, please taking the floor!"
             )
         
-        print("\n-------------------------- LLM main infer config --------------------------")
         infer_config_dict = {
             "inference_config":{
                 "model_name": self.model_config.model_name,
@@ -875,23 +885,13 @@ class LLMProfiler(object):
                 "gpu_TFLOPS": f"{get_TFLOPS_per_gpu(self.gpu_config)} TFLOPS",
             }
         }
-        pprint.pprint(infer_config_dict, indent=4, sort_dicts=False)
-        
-        print("\n---------------------------- LLM Params analysis ----------------------------")
+
         params_per_layer, dict_params_per_layer = self.llm_params.count_params_per_layer()
         num_params_model = self.llm_params.count_params_model()
         
-        self.print_format_summary_dict(dict_params_per_layer, get_dict_depth(dict_params_per_layer))
-        pprint.pprint({"params_model": num_to_string(num_params_model)}, indent=4, sort_dicts=False)
-        
-        print("\n---------------------------- LLM Flops analysis -----------------------------")
         flops_fwd_per_layer, dict_flops_fwd_per_layer = self.llm_flops.count_flops_fwd_per_layer(self.b, self.s)
         num_flops_fwd_model = self.llm_flops.count_flops_fwd_model(self.b, self.s)
         
-        self.print_format_summary_dict(dict_flops_fwd_per_layer, get_dict_depth(dict_flops_fwd_per_layer))
-        pprint.pprint({"flops_model": num_to_string(num_flops_fwd_model)}, indent=4, sort_dicts=False)
-        
-        print("\n---------------------------- LLM Memory analysis -----------------------------")
         memory_prefill_summary_dict, memory_decode_summary_dict = self.llm_memory.count_memory_per_gpu(
             batch_size_per_gpu,
             seq_len,
@@ -902,10 +902,7 @@ class LLMProfiler(object):
             layernorm_dtype_bytes=layernorm_dtype_bytes,
             kv_cache_dtype_bytes=kv_cache_dtype_bytes
         )
-        self.print_format_summary_dict(memory_prefill_summary_dict, get_dict_depth(memory_prefill_summary_dict))
-        self.print_format_summary_dict(memory_decode_summary_dict, get_dict_depth(memory_decode_summary_dict))
-        
-        print("\n-------------------------- LLM infer performance analysis --------------------------")
+
         prefill_latency_breakdown, decode_latency_breakdown = self.llm_latency.count_latency_fwd(
             batch_size_per_gpu,
             seq_len,
@@ -925,15 +922,33 @@ class LLMProfiler(object):
             "total_infer_latency": prefill_latency_breakdown["prefill_latency"] + decode_latency_breakdown["decode_avg_latency"] * generate_len,
         }
         
-        self.print_format_summary_dict(infer_result_dict, get_dict_depth(infer_result_dict))
-        
-        print("\n-------------------------- LLM detailed's latency analysis --------------------------")
-        
-        # pprint.pprint([prefill_latency_breakdown, decode_latency_breakdown], indent=4, sort_dicts=False)
-        
-        # print("prefill_latency_breakdown depth is ", get_dict_depth(prefill_latency_breakdown), prefill_latency_breakdown)
-        self.print_format_summary_dict(prefill_latency_breakdown, get_dict_depth(prefill_latency_breakdown))
-        self.print_format_summary_dict(decode_latency_breakdown, get_dict_depth(decode_latency_breakdown))
+        if print_flag:
+            print("\n-------------------------- LLM main infer config --------------------------")
+            pprint.pprint(infer_config_dict, indent=4, sort_dicts=False)
+            
+            print("\n---------------------------- LLM Params analysis ----------------------------")
+            self.print_format_summary_dict(dict_params_per_layer, get_dict_depth(dict_params_per_layer))
+            pprint.pprint({"params_model": num_to_string(num_params_model)}, indent=4, sort_dicts=False)
+            
+            print("\n---------------------------- LLM Flops analysis -----------------------------")
+            self.print_format_summary_dict(dict_flops_fwd_per_layer, get_dict_depth(dict_flops_fwd_per_layer))
+            pprint.pprint({"prefill flops_model": num_to_string(num_flops_fwd_model)}, indent=4, sort_dicts=False)
+            
+            print("\n---------------------------- LLM Memory analysis -----------------------------")
+            self.print_format_summary_dict(memory_prefill_summary_dict, get_dict_depth(memory_prefill_summary_dict))
+            self.print_format_summary_dict(memory_decode_summary_dict, get_dict_depth(memory_decode_summary_dict))
+            
+            print("\n-------------------------- LLM infer performance analysis --------------------------")
+            self.print_format_summary_dict(infer_result_dict, get_dict_depth(infer_result_dict))
+            
+            print("\n-------------------------- LLM detailed's latency analysis --------------------------")
+            pprint.pprint([prefill_latency_breakdown, decode_latency_breakdown], indent=4, sort_dicts=False)
+            
+            print("prefill_latency_breakdown depth is ", get_dict_depth(prefill_latency_breakdown), prefill_latency_breakdown)
+            self.print_format_summary_dict(prefill_latency_breakdown, get_dict_depth(prefill_latency_breakdown))
+            self.print_format_summary_dict(decode_latency_breakdown, get_dict_depth(decode_latency_breakdown))
+            
+        return memory_decode_summary_dict["max_batch_total_tokens"]
             
     def print_format_summary_dict(self, summary_dict: dict, depth:int) -> str:
         for key, value in summary_dict.items():
@@ -955,15 +970,15 @@ class LLMProfiler(object):
         if depth >= 1:
             pprint.pprint(summary_dict, indent=4, sort_dicts=False)
     
-def llm_profile(model_name="llama-13b",
-                gpu_name: str = "v100-sxm-32gb",
+def llm_profile(model_name="internlm-20b",
+                gpu_name: str = "t4-pcie-15gb",
                 bytes_per_param: int = BYTES_FP16,
-                batch_size_per_gpu: int = 3,
-                seq_len: int = 522,
-                generate_len=1526,
+                batch_size_per_gpu: int = 2,
+                seq_len: int = 300,
+                generate_len=40,
                 ds_zero: int = 0,
                 dp_size: int = 1,
-                tp_size: int = 1,
+                tp_size: int = 4,
                 pp_size: int = 1,
                 sp_size: int = 1,
                 use_kv_cache: bool = True,
@@ -974,6 +989,7 @@ def llm_profile(model_name="llama-13b",
                 intra_node_memory_efficiency=INTRA_NODE_MEMORY_EFFICIENCY,
                 inter_node_memory_efficiency=INTER_NODE_MEMORY_EFFICIENCY,
                 mode: str = "inference",
+                print_flag: bool = True,
             ) -> dict:
     """Returns dict of the total floating-point operations, MACs, parameters and latency of a llm.
 
@@ -1027,12 +1043,40 @@ def llm_profile(model_name="llama-13b",
 
     profiler = LLMProfiler(llm_configs)
     
-    profiler.infer_profile(batch_size_per_gpu=batch_size_per_gpu, seq_len=seq_len, 
+    max_batch_total_tokens = profiler.infer_profile(batch_size_per_gpu=batch_size_per_gpu, seq_len=seq_len, 
                         generate_len=generate_len, use_kv_cache=use_kv_cache,
                         layernorm_dtype_bytes=layernorm_dtype_bytes,
                         flops_efficiency=flops_efficiency,
-                        hbm_memory_efficiency=hbm_memory_efficiency)  
+                        hbm_memory_efficiency=hbm_memory_efficiency,
+                        print_flag=print_flag)
+    
+    return max_batch_total_tokens 
     
 if __name__ == "__main__": 
-    llm_profile()
-    # fire.Fire(serialize=lambda x: json.dumps(x, indent=4))
+    # llm_profile(print_flag=True)
+    
+    model_name_list = ["llama-7b", "llama-13b", "llama-65b", "llama2-70b", "internlm-20b"]
+    gpu_name_list = ["a30-sxm-24gb", "a40-pcie-48gb", "a100-sxm-40gb", "a100-sxm-80gb", "910b-64gb", "v100-sxm-32gb", "t4-pcie-15gb"]
+    tp_nums_list = [1, 2, 4, 8]
+    tgi_service_dict_list = []
+    seq_len, generate_len = 1024, 1024
+    
+    for model_name in model_name_list:
+        if model_name in ["llama2-70b", "internlm-20b"]:
+            seq_len, generate_len = 1024, 1024
+            
+        for gpu_name in gpu_name_list:
+            for tp_size in tp_nums_list:
+                try:
+                    max_batch_total_tokens = int(llm_profile(model_name=model_name, gpu_name=gpu_name, tp_size=tp_size,
+                                                         seq_len=seq_len, generate_len=generate_len, print_flag=False))
+                except Exception as e:
+                    print(f"model_name: {model_name}, gpu_name: {gpu_name}, tp_size: {tp_size}, error: {e}")
+                    continue
+                
+                tgi_service_dict = {"model_name": model_name, "gpu_name": gpu_name, "tp_size": tp_size, "max_batch_total_tokens": max_batch_total_tokens, "max_batch_size": floor(max_batch_total_tokens / (seq_len + generate_len))}
+                tgi_service_dict_list.append(tgi_service_dict)
+    
+    print("================================== TGI+LightLLM service max_batch_total_tokens params list =============================")
+    print_list(tgi_service_dict_list)
+                

@@ -88,15 +88,19 @@ class ParallelismConfig:
 @dataclass
 class ModelConfig:
     num_layers: int  # number of transformer layers (blocks)
-    n_head: int      # number of attention heads
+    n_head: int      # number of attention heads 
     hidden_dim: int  # hidden dimension
     vocab_size: int  # vocabulary size
+    num_key_value_heads: int = None 
     max_seq_len: int = None   # max sequence length
     ffn_embed_dim: int = None # hidden dimension of FFN, default to 4 * hidden_dim
     model_type: str = None    # model type as tagged on Hugging Face (e.g., gpt2, opt, llama.)
     model_name: str = None    # model name as tagged on Hugging Face (e.g., gpt2-xl, opt, llama-13b.)
     
     def __post_init__(self):
+        if self.num_key_value_heads is None: # 如果不存在，设置默认值
+            self.num_key_value_heads = self.n_head 
+            
         if self.ffn_embed_dim is None:
             self.ffn_embed_dim = self.hidden_dim * 4
         
